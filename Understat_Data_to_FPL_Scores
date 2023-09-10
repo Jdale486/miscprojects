@@ -1,0 +1,93 @@
+#some parts of code taken from https://footballdotpy.medium.com/scrape-a-whole-leagues-worth-of-shot-and-xg-data-from-understat-75f1f112e874 - tweaked to find player level data rather than shot level data
+understat_ids = range(22275,22285+1)
+
+match_data = []
+
+for id in understat_ids:
+    base_urls = f'https://understat.com/match/{id}'
+#Use requests to get the webpage and BeautifulSoup to parse the page
+    res = requests.get(base_urls)
+    soup = BeautifulSoup(res.content, 'lxml')
+    scripts = soup.find_all('script')
+#get only the shotsData
+    strings = scripts[2].string
+
+# strip unnecessary symbols and get only JSON data
+    ind_start = strings.index("('")+2
+    ind_end = strings.index("')")
+    json_data = strings[ind_start:ind_end]
+    json_data = json_data.encode('utf8').decode('unicode_escape')
+
+#convert string to json format
+    data = json.loads(json_data)
+
+#iterate JSON and extend match_data with a list of dicts
+    df = pd.DataFrame.from_dict({(i, j): data[i][j] for i in data.keys() for j in data[i].keys()}, orient='index')
+
+    df['Home Goals Conceded'] = df[df['h_a'] == 'a']['goals'].astype(int).sum() +  df[df['h_a'] == 'h']['own_goals'].astype(int).sum()
+
+    df['Away Goals Conceded'] = df[df['h_a'] == 'h']['goals'].astype(int).sum() +  df[df['h_a'] == 'a']['own_goals'].astype(int).sum()
+
+#Filter out any players who have played less than 60 minutes, meaning they wouldn't receive clean sheet points
+
+    df_filtered = df[df['time'].astype(int) > 59]
+
+#If Home/Away field contains 'h', then 'Home goals conceded' else 'Away Goals Conceded'
+    df_filtered['PlayerGoalsConceded'] = np.where(df_filtered['h_a'].str.contains('h'),
+                                        df_filtered['Home Goals Conceded'],
+                                        df_filtered['Away Goals Conceded'])
+
+#If the player has conceded no goals and is a defender/Goalkeeper, then show '4 points' as per FPL point scoring system.
+    df_filtered['CSxPAll'] = np.where(df_filtered['PlayerGoalsConceded']==0,
+                                        4,
+                                        0)
+    df_filtered['CSxP'] = np.where(df_filtered['position'].str.contains('D|GK'),
+                                        df_filtered['CSxPAll'],
+                                        0)    
+
+    df_filtered['xG'] = df_filtered['xG'].astype(float)
+
+    df_filtered['xA'] = df_filtered['xA'].astype(float)
+
+#Total potential points scored for Goals/Assists based on multiplying xG*4 and xA*3 as per FPL point scoring system
+    df_filtered['xP'] = df_filtered['xG']*4 + df_filtered['xA']*3 
+
+    df_filtered['matchid'] = id                                      
+
+    df_filtered.reset_index(drop=True, inplace=True)
+#append match data as per above loop
+    match_data.append(df_filtered)
+
+concat_df = pd.concat(match_data, ignore_index=True)
+
+concat_df = pd.concat(match_data, ignore_index=True)
+
+concat_df = concat_df.sort_values(by=['player', 'matchid']).reset_index(drop=True)
+
+#Calculate Rolling 5 game score (based on player's last appearances), mean score over season and sum of score over season
+concat_df['CSxP-5Games']= concat_df.groupby('player')['CSxP'].rolling(5, min_periods=1).sum().reset_index(drop=True)
+
+concat_df.groupby('player')['CSxP'].rolling(5, min_periods=1).sum().reset_index(drop=True)
+
+concat_df['xP-5Games']= concat_df.groupby('player')['xP'].rolling(5, min_periods=1).sum().reset_index(drop=True)
+
+concat_df['CSxP_Mean'] = concat_df['CSxP']
+concat_df['xP_Mean'] = concat_df['xP']
+
+
+def sum_xP(x):
+    return x.sum()
+
+def get_recent_xP(x):
+    return x.iloc[-1]
+
+def avg_xP(x):
+    return x.mean()
+
+concat_df = concat_df.groupby('player').agg({'CSxP': sum_xP, 'CSxP-5Games': get_recent_xP,'CSxP_Mean':avg_xP,'xP':sum_xP, 'xP-5Games':get_recent_xP, 'xP_Mean':avg_xP}).reset_index()
+
+concat_df['xP-5Games']=concat_df['xP-5Games']+concat_df['CSxP-5Games']
+concat_df['xP']=concat_df['xP']+concat_df['CSxP']
+
+#Export data to CSV to assess best performing players
+concat_df.to_csv('Epl2223MatchData.csv',index=False)
