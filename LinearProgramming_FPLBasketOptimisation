@@ -1,0 +1,86 @@
+import pandas as pd
+import thefuzz as tf
+from thefuzz import process
+from thefuzz import fuzz
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+import warnings
+from pulp import *
+
+import warnings
+
+warnings.filterwarnings('ignore')
+
+FPLData = pd.read_csv(r'fpl2223.csv')
+USData= pd.read_csv(r'Epl2223.csv')
+FPLData.rename(columns={'Full Name': 'Player'}, inplace=True)
+FPLData.head()
+
+USDataPivot= USData
+USDataPivot['player_shot']=USDataPivot['player']
+SelectedCols = USDataPivot[['fixtureName','date','h_team','a_team','xG','player_shot','player_assisted']]
+unpivoted_df = pd.melt(SelectedCols, id_vars=['xG','h_team','a_team','fixtureName','date'], var_name='EventType', value_name='Player')
+unpivoted_df['xP'] = np.where(unpivoted_df['EventType'].str.contains('assisted'),
+                                      unpivoted_df['xG'] * 3,
+                                      unpivoted_df['xG'] * 4)
+unpivoted_df['Player_Match_No.'] = unpivoted_df.groupby('Player')['date'].transform('rank',method='dense', ascending=False)
+grouped_df = unpivoted_df.groupby(['Player', 'fixtureName','Player_Match_No.'])['xP'].sum().reset_index()
+#grouped_df['xP-5Games'] = grouped_df.groupby(['Player'])['xP'].transform(lambda x: x.rolling(5, min_periods=1).sum())
+USData2223 = grouped_df.sort_values(by=['Player', 'Player_Match_No.']).reset_index(drop=True)
+USData2223['xP-5Games'] = USData2223.groupby('Player')['xP'].rolling(5, min_periods=1).mean().reset_index(drop=True)
+USData2223['xP_Mean'] = USData2223['xP']
+
+def sum_xP(x):
+    return x.sum()
+
+def get_recent_xP(x):
+    return x.iloc[-1]
+
+def avg_xP(x):
+    return x.mean()
+
+USData2223 = USData2223.groupby('Player').agg({'xP': sum_xP, 'xP-5Games': get_recent_xP,'xP_Mean':avg_xP}).reset_index()
+USData2223['xP_Coefficient'] = (USData2223['xP-5Games'] /  USData2223['xP_Mean'])
+USData2223['xP_CV'] = USData2223['xP_Mean'] *  USData2223['xP_Coefficient']
+
+
+print(USData2223)
+
+# Rename the misspelled columns
+USData2223.index = USData2223.index.astype(str).map(lambda x: process.extractOne(x, FPLData["Player"], scorer=fuzz.partial_ratio)[0])
+
+# Attempt to join the two dataframe
+LPdata = pd.merge(USData2223, FPLData, on="Player", how="right")
+
+print(LPdata.head())
+
+LPdata.dropna(subset=['xP'], inplace=True)
+LPdata.to_csv('groupedplayerdatatest2.csv')
+
+Players = list(LPdata['Player'])
+Cost = dict(zip(Players, LPdata['now_cost']))
+xGCF = dict(zip(Players, LPdata['xP-5Games']))
+positions = dict(zip(Players, LPdata['element_type']))
+
+player_vars = LpVariable.dicts("Player", Players, lowBound=0, upBound=1, cat='Integer')
+
+total_score = LpProblem("Fantasy_Points_Problem", LpMaximize)
+total_score += lpSum([xGCF[i] * player_vars[i] for i in player_vars])
+total_score += lpSum([Cost[i] * player_vars[i] for i in player_vars]) <= 1000
+
+# Get indices of players for each position
+GK = [p for p in positions.keys() if positions[p] == 1]
+DF = [p for p in positions.keys() if positions[p] == 2]
+MF = [p for p in positions.keys() if positions[p] == 3]
+ST = [p for p in positions.keys() if positions[p] == 4]
+# Set Constraints
+total_score += lpSum([player_vars[i] for i in GK]) == 2
+total_score += lpSum([player_vars[i] for i in DF]) == 5
+total_score += lpSum([player_vars[i] for i in MF]) == 5
+total_score += lpSum([player_vars[i] for i in ST]) == 3
+
+total_score.solve()
+
+for v in total_score.variables():
+    if v.varValue > 0:
+        print(v.name)
