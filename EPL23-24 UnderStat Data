@@ -1,0 +1,38 @@
+import requests
+from bs4 import BeautifulSoup
+import json
+import pandas as pd
+import numpy as np
+from decimal import Decimal
+import itertools as it
+
+%%time
+
+match_data = []
+
+for id in it.chain(range(22275, 22304+1), range(21925, 22009+1)):
+    base_urls = f'https://understat.com/match/{id}'
+#Use requests to get the webpage and BeautifulSoup to parse the page
+    res = requests.get(base_urls)
+    soup = BeautifulSoup(res.content, 'lxml')
+    scripts = soup.find_all('script')
+#get only the shotsData
+    strings = scripts[1].string
+
+# strip unnecessary symbols and get only JSON data
+    ind_start = strings.index("('")+2
+    ind_end = strings.index("')")
+    json_data = strings[ind_start:ind_end]
+    json_data = json_data.encode('utf8').decode('unicode_escape')
+
+#convert string to json format
+    data = json.loads(json_data)
+#iterate JSON and extend match_data with a list of dicts
+    match_data.extend([d for k in data.keys() for d in data[k]])
+
+global epl
+epl = pd.DataFrame(match_data)
+
+epl['fixtureName'] = epl['h_team'] + ' ' + 'v' + ' ' + epl['a_team']
+
+epl.to_csv('Epl2324.csv',index=False)
